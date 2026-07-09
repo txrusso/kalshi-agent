@@ -33,8 +33,32 @@ def make_engine(settings: Settings) -> Engine:
     return engine
 
 
+def _sync_missing_columns(engine: Engine) -> None:
+    """create_all only creates missing TABLES, never adds columns to a table
+    that already exists — if a model gains a field, an existing local DB
+    silently keeps the old schema and later crashes with "no such column"
+    the first time that field is actually used. Hit this for real 2026-07-09
+    (Order.fair_value_at_entry/time_horizon, added mid-session, weren't in
+    the already-created orders table — the running agent crashed on its
+    first order attempt). Additive only (no rename/drop/type-change) — a
+    proportionate safety net for a solo local SQLite project, not a
+    replacement for a real migration tool if this ever needs one."""
+    with engine.connect() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table.name})")}
+            if not existing:
+                continue  # table didn't exist before create_all — already correct
+            for column in table.columns:
+                if column.name not in existing:
+                    col_type = column.type.compile(dialect=engine.dialect)
+                    conn.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {col_type}")
+        conn.commit()
+
+
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "sqlite":
+        _sync_missing_columns(engine)
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
