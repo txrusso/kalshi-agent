@@ -9,6 +9,9 @@ set "LOCKFILE=%PROJECT_ROOT%\agent.lock"
 
 if exist "%LOCKFILE%" (
     echo %date% %time% lock file present, agent likely already running - skipping >> logs\agent_scheduler.log
+    echo A lock file already exists ^(agent.lock^). If the agent isn't actually
+    echo running, delete agent.lock and double-click this file again.
+    pause
     exit /b 0
 )
 
@@ -22,3 +25,6 @@ echo %date% %time% starting agent, logging to %LOGFILE% >> logs\agent_scheduler.
 py -m uv run python -m kalshi_agent.orchestrator >> "%LOGFILE%" 2>&1
 
 del "%LOCKFILE%"
+echo.
+echo Agent stopped. Log: %LOGFILE%
+pause
