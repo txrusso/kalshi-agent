@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kalshi-dashboard",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["-m", "uv", "run", "streamlit", "run", "src/kalshi_agent/dashboard/app.py", "--server.headless", "true"],
+      "port": 8501
+    }
+  ]
+}

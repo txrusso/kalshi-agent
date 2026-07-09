@@ -23,6 +23,10 @@ build/
 /data/
 *.parquet
 
+# Runtime / scheduling
+/logs/
+poller.lock
+
 # OS / editor
 .DS_Store
 .vscode/

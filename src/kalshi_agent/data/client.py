@@ -17,10 +17,10 @@ class KalshiClient:
     """Async REST client for Kalshi's trade API v2. Handles RSA-PSS request
     signing, client-side rate limiting, and retry/backoff on 429/5xx."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._settings = settings
         self._signer = KalshiSigner(settings.kalshi_api_key_id, settings.private_key_pem)
-        self._http = httpx.AsyncClient(base_url=settings.kalshi_rest_base, timeout=10.0)
+        self._http = httpx.AsyncClient(base_url=settings.kalshi_rest_base, timeout=10.0, transport=transport)
         self._read_bucket = TokenBucket(rate=settings.read_rate_limit, capacity=settings.read_rate_limit)
         self._write_bucket = TokenBucket(rate=settings.write_rate_limit, capacity=settings.write_rate_limit)
 
@@ -52,7 +52,22 @@ class KalshiClient:
 
         resp: httpx.Response | None = None
         for attempt in range(MAX_RETRIES):
-            resp = await self._http.request(method, path, params=params, json=json, headers=headers)
+            try:
+                resp = await self._http.request(method, path, params=params, json=json, headers=headers)
+            except httpx.TransportError as exc:
+                # Connection-level failures (dropped connection, DNS hiccup,
+                # timeout) — no status code to check, but still worth a retry.
+                # Hit this for real via a mid-poll network drop 2026-07-08.
+                backoff = min(2**attempt, 30)
+                logger.warning(
+                    "kalshi %s %s -> %s, retrying in %.0fs (attempt %d/%d)",
+                    method, path, type(exc).__name__, backoff, attempt + 1, MAX_RETRIES,
+                )
+                if attempt == MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(backoff)
+                continue
+
             if resp.status_code == 429 or resp.status_code >= 500:
                 backoff = min(2**attempt, 30)
                 logger.warning(

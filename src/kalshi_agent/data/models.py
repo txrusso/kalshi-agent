@@ -1,6 +1,6 @@
 import datetime as dt
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -31,11 +31,13 @@ class PriceSnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ticker: Mapped[str] = mapped_column(ForeignKey("markets.ticker"), index=True)
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
-    yes_bid: Mapped[int | None] = mapped_column(Integer)
-    yes_ask: Mapped[int | None] = mapped_column(Integer)
-    last_price: Mapped[int | None] = mapped_column(Integer)
-    volume: Mapped[int | None] = mapped_column(Integer)
-    open_interest: Mapped[int | None] = mapped_column(Integer)
+    # Kalshi's current market schema reports these as dollar-string fields
+    # (e.g. "0.4500" for 45c), not integer cents — stored here as floats in [0, 1].
+    yes_bid: Mapped[float | None] = mapped_column(Float)
+    yes_ask: Mapped[float | None] = mapped_column(Float)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float)
+    open_interest: Mapped[float | None] = mapped_column(Float)
 
 
 class OrderbookSnapshot(Base):
@@ -48,16 +50,52 @@ class OrderbookSnapshot(Base):
     no_levels: Mapped[list] = mapped_column(JSON)
 
 
+class Order(Base):
+    __tablename__ = "orders"
+
+    # Client-generated idempotency key (build spec §6 "Idempotency") — primary
+    # key so retried submissions of the same logical order can't double-insert.
+    client_order_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kalshi_order_id: Mapped[str | None] = mapped_column(String, index=True)
+    ticker: Mapped[str] = mapped_column(String, index=True)
+    side: Mapped[str] = mapped_column(String)  # "yes" | "no"
+    action: Mapped[str] = mapped_column(String)  # "buy" | "sell"
+    order_type: Mapped[str] = mapped_column(String)  # "limit" | "market"
+    price: Mapped[float | None] = mapped_column(Float)
+    count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String)  # "pending" | "resting" | "filled" | "cancelled" | "rejected"
+    mode: Mapped[str] = mapped_column(String)  # "PAPER" | "LIVE"
+    strategy: Mapped[str | None] = mapped_column(String)
+    reason: Mapped[str | None] = mapped_column(Text)  # signal/edge that triggered this order
+    created_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    raw: Mapped[dict | None] = mapped_column(JSON)
+
+
 class Fill(Base):
     __tablename__ = "fills"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    order_id: Mapped[str] = mapped_column(String, index=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.client_order_id"), index=True)
     ticker: Mapped[str] = mapped_column(String, index=True)
     side: Mapped[str] = mapped_column(String)
     action: Mapped[str] = mapped_column(String)
-    price: Mapped[int] = mapped_column(Integer)
+    price: Mapped[float] = mapped_column(Float)
     count: Mapped[int] = mapped_column(Integer)
+    fee: Mapped[float] = mapped_column(Float, default=0.0)
     is_taker: Mapped[bool] = mapped_column()
+    mode: Mapped[str] = mapped_column(String)  # "PAPER" | "LIVE"
     ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
-    raw: Mapped[dict] = mapped_column(JSON)
+    raw: Mapped[dict | None] = mapped_column(JSON)
+
+
+class AuditLogEntry(Base):
+    """Every signal, decision, order, fill, and cancel — build spec §6 "Audit log"."""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
+    event_type: Mapped[str] = mapped_column(String, index=True)
+    ticker: Mapped[str | None] = mapped_column(String, index=True)
+    details: Mapped[dict] = mapped_column(JSON)
