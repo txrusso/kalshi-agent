@@ -40,11 +40,19 @@ def build_signal_from_history(session: Session, settings) -> FavoriteLongshotSig
 
 def latest_open_market_candidates(session: Session) -> list[tuple[str, str, dt.datetime | None, float]]:
     """(ticker, event_ticker, expiration_time, current_price) for every
-    currently open, tracked market — the candidate set for trading decisions."""
+    currently open, tracked market — the candidate set for trading decisions.
+
+    Kalshi's `/markets?status=open` query filter returns markets whose OWN
+    `status` field reads "active", not "open" — "open" is only a valid query
+    *parameter* value, never a value stored in the response body. Filtering
+    on `Market.status == "open"` here silently matched zero rows in
+    production (real DB check 2026-07-09: 0 markets with status='open',
+    24,314 with status='active') even though the poller had been correctly
+    tracking them all along — a genuine bug, not the risk-threshold finding."""
     rows = session.execute(
         select(Market.ticker, Market.event_ticker, Market.expiration_time, LatestPrice.last_price)
         .join(LatestPrice, LatestPrice.ticker == Market.ticker)
-        .where(Market.status == "open")
+        .where(Market.status == "active")
     ).all()
     return [(ticker, event_ticker, expiration_time, price) for ticker, event_ticker, expiration_time, price in rows if price is not None]
 

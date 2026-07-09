@@ -26,11 +26,22 @@ class Settings(BaseSettings):
     live_armed: bool = False
 
     # Risk limits (build spec §6), expressed as fractions of current account
-    # balance so they scale sensibly regardless of bankroll size. Defaults are
-    # deliberately conservative per the user's stated low-to-medium risk
-    # preference (2026-07-08) — well under the spec's illustrative examples.
-    kelly_fraction: float = 0.125  # 1/8-Kelly, below the spec's ¼-Kelly example
-    min_net_edge_dollars: float = 0.04  # per contract, above the spec's 2-3c starting point
+    # balance so they scale sensibly regardless of bankroll size.
+    #
+    # Updated 2026-07-09 at user request: "low-to-medium" -> "medium" risk,
+    # specifically so the agent actually places trades. Real backtesting
+    # (2026-07-09) found the only two calibration buckets with enough data to
+    # trust (0-5c, 95-100c) top out at a net edge of ~3.3-4c after fees — the
+    # prior min_net_edge_dollars=0.04 threshold rejected every single one of
+    # them, producing zero trades. Halved to 0.02 so that real, validated
+    # edge clears the bar; still requires genuine post-fee profit, not a
+    # blank check. kelly_fraction bumped 1/8 -> 3/16 (still well under the
+    # spec's own ¼-Kelly reference, let alone full Kelly). Portfolio-level
+    # caps below (exposure/loss limits) were deliberately left unchanged —
+    # the user asked for more trades to happen, not for weaker capital
+    # protection once they do.
+    kelly_fraction: float = 0.1875  # 3/16-Kelly
+    min_net_edge_dollars: float = 0.02  # per contract
     per_market_max_fraction: float = 0.10
     aggregate_max_fraction: float = 0.50
     correlated_event_max_fraction: float = 0.20

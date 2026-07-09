@@ -43,10 +43,14 @@ def _session_factory(tmp_path):
 
 
 def _seed_open_market(Session, ticker, event_ticker, price, expiration_time=None):
+    # Kalshi's actual status value for an open/tradeable market is "active",
+    # not "open" — "open" is only a query-parameter value, never a value
+    # Kalshi puts in the response body. See orchestrator.py's
+    # latest_open_market_candidates docstring for the real-data confirmation.
     now = dt.datetime.now(dt.timezone.utc)
     with Session() as session:
         session.add(Market(ticker=ticker, event_ticker=event_ticker, series_ticker=event_ticker.split("-")[0],
-                            title="t", status="open", expiration_time=expiration_time, raw={}))
+                            title="t", status="active", expiration_time=expiration_time, raw={}))
         session.add(LatestPrice(ticker=ticker, ts=now, yes_bid=price, yes_ask=price, last_price=price, volume=1, open_interest=1))
         session.commit()
 
