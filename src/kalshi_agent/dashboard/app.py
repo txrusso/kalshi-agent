@@ -6,6 +6,7 @@ from kalshi_agent.config import settings
 from kalshi_agent.dashboard.data import (
     get_account_summary,
     get_data_collection_status,
+    get_paper_performance,
     get_recent_audit_events,
     get_recent_orders,
     seconds_since,
@@ -54,6 +55,12 @@ col2.metric(
     delta=f"{account['paper_balance_dollars'] - account['paper_starting_balance']:+.2f}",
 )
 col3.metric("Open paper positions", len(account["paper_positions"]))
+
+performance = get_paper_performance(session_factory)
+col4, col5 = st.columns(2)
+win_rate = performance["win_rate"]
+col4.metric("Paper win rate", f"{win_rate:.0%}" if win_rate is not None else "n/a (no resolved trades yet)")
+col5.metric("Resolved paper trades", f"{performance['wins']} / {performance['resolved_trades']}")
 
 if real_balance is None and "_balance_error" in st.session_state:
     st.warning(f"Couldn't fetch live balance: {st.session_state['_balance_error']}")

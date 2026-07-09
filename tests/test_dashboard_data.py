@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from kalshi_agent.dashboard.data import (
     get_account_summary,
     get_data_collection_status,
+    get_paper_performance,
     get_recent_audit_events,
     get_recent_orders,
     seconds_since,
@@ -105,3 +106,36 @@ def test_seconds_since_handles_none_and_naive_datetimes():
     result = seconds_since(naive_but_utc)
     assert result is not None
     assert 25 < result < 35
+
+
+def _paper_buy_order(client_order_id: str, ticker: str, side: str, ts: dt.datetime) -> Order:
+    return Order(
+        client_order_id=client_order_id, kalshi_order_id=None, ticker=ticker, side=side, action="buy",
+        order_type="limit", price=0.5, count=10, status="filled", mode="PAPER", strategy=None, reason=None,
+        fair_value_at_entry=None, time_horizon=None, created_ts=ts, updated_ts=ts, raw=None,
+    )
+
+
+def test_paper_performance_computes_win_rate_from_resolved_markets(tmp_path):
+    Session = _session_factory(tmp_path)
+    now = dt.datetime.now(dt.timezone.utc)
+    with Session() as session:
+        session.add(Market(ticker="WIN-1", event_ticker="E1", series_ticker="S", title="t", status="finalized", result="yes", raw={}))
+        session.add(Market(ticker="LOSE-1", event_ticker="E2", series_ticker="S", title="t", status="finalized", result="no", raw={}))
+        session.add(Market(ticker="OPEN-1", event_ticker="E3", series_ticker="S", title="t", status="open", result=None, raw={}))
+        session.add(_paper_buy_order("o1", "WIN-1", "yes", now))   # bought yes, resolved yes -> win
+        session.add(_paper_buy_order("o2", "LOSE-1", "yes", now))  # bought yes, resolved no -> loss
+        session.add(_paper_buy_order("o3", "OPEN-1", "yes", now))  # unresolved -> excluded
+        session.commit()
+
+    performance = get_paper_performance(Session)
+
+    assert performance["resolved_trades"] == 2
+    assert performance["wins"] == 1
+    assert performance["win_rate"] == 0.5
+
+
+def test_paper_performance_none_when_no_resolved_trades(tmp_path):
+    Session = _session_factory(tmp_path)
+    performance = get_paper_performance(Session)
+    assert performance == {"resolved_trades": 0, "wins": 0, "win_rate": None}

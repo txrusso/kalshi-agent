@@ -31,6 +31,32 @@ def get_account_summary(session_factory: sessionmaker, settings, *, real_balance
     }
 
 
+def get_paper_performance(session_factory: sessionmaker) -> dict:
+    """Win rate among PAPER entry orders whose underlying market has since
+    resolved — a "win" means the side bought matches the resolution. Not
+    tied to whether an explicit exit/sell happened; a position still open
+    when its market resolves counts too, since that's the real outcome."""
+    with session_factory() as session:
+        rows = session.execute(
+            select(Order.side, Market.result)
+            .join(Market, Market.ticker == Order.ticker)
+            .where(
+                Order.mode == "PAPER",
+                Order.action == "buy",
+                Order.status == "filled",
+                Market.result.in_(("yes", "no")),
+            )
+        ).all()
+
+    wins = sum(1 for side, result in rows if side == result)
+    total = len(rows)
+    return {
+        "resolved_trades": total,
+        "wins": wins,
+        "win_rate": (wins / total) if total else None,
+    }
+
+
 def _db_size_mb(database_url: str) -> float:
     if not database_url.startswith("sqlite"):
         return 0.0

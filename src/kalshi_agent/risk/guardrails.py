@@ -12,6 +12,13 @@ class OrderRequest:
     count: int
     mode: Literal["PAPER", "LIVE"]
     order_type: Literal["limit", "market"] = "limit"
+    # Set on entry (buy) orders only, in the entry side's own price terms —
+    # e.g. for a "no" position, both are already expressed as (1 - yes price).
+    # Used later to decide whether a long-term position has captured enough
+    # of its edge to exit early (strategy/exit.py) rather than hold to
+    # resolution — user directive 2026-07-09.
+    fair_value_at_entry: float | None = None
+    time_horizon: Literal["short", "long"] | None = None
 
 
 @dataclass

@@ -4,8 +4,21 @@ from pathlib import Path
 from sqlalchemy import create_engine
 
 from kalshi_agent.data.models import Market, PriceSnapshot
-from kalshi_agent.data.poller import series_ticker_from_event, sync_markets_and_snapshot
+from kalshi_agent.data.poller import (
+    _effective_size_cap,
+    backfill_settled_markets,
+    series_ticker_from_event,
+    sync_markets_and_snapshot,
+)
 from kalshi_agent.data.store import init_db, make_session_factory
+
+
+def test_effective_size_cap_subtracts_safety_margin():
+    assert _effective_size_cap(500_000_000) == 490_000_000
+
+
+def test_effective_size_cap_floors_at_zero():
+    assert _effective_size_cap(5_000_000) == 0
 
 
 def test_series_ticker_from_event():
@@ -99,3 +112,109 @@ async def test_new_markets_skipped_once_over_size_cap(tmp_path):
     assert tickers == []
     with Session() as session:
         assert session.get(Market, "KXFED-25DEC-T4.50") is None
+
+
+class FakePerSeriesClient:
+    """Duck-types get_markets(series_ticker=..., status=..., ...) -> one
+    canned page per series ticker, and records every call for assertions."""
+
+    def __init__(self, markets_by_series: dict[str, list[dict]]) -> None:
+        self._markets_by_series = markets_by_series
+        self.calls: list[dict] = []
+
+    async def get_markets(self, **params):
+        self.calls.append(params)
+        markets = self._markets_by_series.get(params.get("series_ticker"), [])
+        return {"markets": markets, "cursor": None}
+
+
+async def test_backfill_settled_queries_per_series_with_result(tmp_path):
+    markets_by_series = {
+        "KXFED": [_market("KXFED-25DEC-T4.50", "KXFED-25DEC", status="finalized", result="yes")],
+        "KXCPI": [_market("KXCPI-25DEC-T1", "KXCPI-25DEC", status="finalized", result="no")],
+    }
+    client = FakePerSeriesClient(markets_by_series)
+    db_url = f"sqlite:///{tmp_path / 'settled.db'}"
+    engine = create_engine(db_url, future=True)
+    init_db(engine)
+    Session = make_session_factory(engine)
+
+    with Session() as session:
+        tickers = await backfill_settled_markets(
+            client, session, allowed_series={"KXFED", "KXCPI"}, max_db_size_bytes=10**9, database_url=db_url
+        )
+
+    assert set(tickers) == {"KXFED-25DEC-T4.50", "KXCPI-25DEC-T1"}
+    assert all(c["status"] == "settled" and c["mve_filter"] == "exclude" for c in client.calls)
+    assert {c["series_ticker"] for c in client.calls} == {"KXFED", "KXCPI"}
+
+    with Session() as session:
+        assert session.get(Market, "KXFED-25DEC-T4.50").result == "yes"
+        assert session.get(Market, "KXCPI-25DEC-T1").result == "no"
+
+
+async def test_backfill_settled_stops_when_over_size_cap(tmp_path):
+    markets_by_series = {
+        "KXFED": [_market("KXFED-25DEC-T4.50", "KXFED-25DEC", status="finalized", result="yes")],
+    }
+    client = FakePerSeriesClient(markets_by_series)
+    db_url = f"sqlite:///{tmp_path / 'settled.db'}"
+    engine = create_engine(db_url, future=True)
+    init_db(engine)
+    Session = make_session_factory(engine)
+
+    with Session() as session:
+        tickers = await backfill_settled_markets(
+            client, session, allowed_series={"KXFED"}, max_db_size_bytes=0, database_url=db_url
+        )
+
+    assert tickers == []
+    assert client.calls == []
+
+
+class FakePaginatedSeriesClient:
+    """One series with two pages, to test that the size cap is rechecked
+    between pages within a single series, not just between series."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def get_markets(self, **params):
+        self.calls.append(params)
+        if not params.get("cursor"):
+            return {
+                "markets": [_market("KXFED-25DEC-T1", "KXFED-25DEC", status="finalized", result="yes")],
+                "cursor": "page2",
+            }
+        return {
+            "markets": [_market("KXFED-25DEC-T2", "KXFED-25DEC", status="finalized", result="no")],
+            "cursor": None,
+        }
+
+
+async def test_backfill_settled_stops_mid_series_between_pages(tmp_path, monkeypatch):
+    """Regression test: size cap used to be checked only once per series, so a
+    series with many pages could blow past the cap before the next series-level
+    check caught it (real overshoot: 512.5MB vs a 500MB cap). Simulate DB growth
+    via a fake size function so the first page pushes it over the cap, and
+    assert the second page of the *same* series is never fetched."""
+    import kalshi_agent.data.poller as poller_module
+
+    sizes = iter([0, 100])  # before page 1: under cap; before page 2: over cap
+    monkeypatch.setattr(poller_module, "_db_size_bytes", lambda database_url: next(sizes))
+
+    client = FakePaginatedSeriesClient()
+    db_url = f"sqlite:///{tmp_path / 'settled.db'}"
+    engine = create_engine(db_url, future=True)
+    init_db(engine)
+    Session = make_session_factory(engine)
+
+    with Session() as session:
+        # +10_000_050 rather than 50 directly: the safety margin subtracts
+        # 10MB from the raw cap before comparing (see _effective_size_cap).
+        tickers = await backfill_settled_markets(
+            client, session, allowed_series={"KXFED"}, max_db_size_bytes=10_000_050, database_url=db_url
+        )
+
+    assert tickers == ["KXFED-25DEC-T1"]
+    assert len(client.calls) == 1  # second page of KXFED never fetched

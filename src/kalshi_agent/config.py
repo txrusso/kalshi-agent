@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     kalshi_private_key_path: Path
     kalshi_env: Literal["demo", "production"] = "demo"
 
+    # Real-world-data signals (added 2026-07-09 at user request). NWS weather
+    # data is free/keyless. FRED (economic indicators) needs a free key from
+    # https://fred.stlouisfed.org/docs/api/api_key.html — unset by default,
+    # and anything depending on it should degrade gracefully rather than error.
+    fred_api_key: str | None = None
+
     mode: Literal["PAPER", "LIVE"] = "PAPER"
 
     # Master enable switch (build spec §6) — nothing places an order, PAPER or
@@ -31,6 +37,34 @@ class Settings(BaseSettings):
     daily_loss_limit_fraction: float = 0.05
     max_contracts_per_order: int = 500
 
+    # S2 favorite-longshot calibration (build spec Phase 1 / ranked idea #5).
+    # min_samples=20 was tested against real settled-market data 2026-07-09
+    # and produced a bucket that looked like a 40% win rate on 8/20 samples,
+    # then went 0-for-32 out of sample — pure small-sample noise, made worse
+    # by residual correlation between nearby-but-distinct events (e.g. many
+    # BTC-threshold markets a few hours apart still track one price trend).
+    # Raised to 200 so only buckets with real statistical power are trusted;
+    # in practice that means the well-populated extreme-price buckets, which
+    # is exactly where the literature says the bias concentrates anyway.
+    calibration_bucket_width: float = 0.05
+    calibration_min_samples: int = 200
+
+    # Time-horizon preference (user directive 2026-07-09): favor shorter-
+    # dated contracts. Markets closing within short_term_horizon_days trade
+    # at the normal min_net_edge_dollars bar; longer-dated ones must clear
+    # long_term_edge_multiplier x that bar to be taken at all — a soft bias,
+    # not a hard cutoff (see strategy/horizon.py, strategy/decision.py).
+    short_term_horizon_days: float = 7.0
+    long_term_edge_multiplier: float = 2.0
+
+    # Alpha-realization exit for long-term positions (user directive
+    # 2026-07-09): once a long-term position's current price has captured
+    # this fraction of the edge estimated at entry, close it rather than
+    # holding to resolution — frees capital and avoids weeks/months of tail
+    # resolution risk. Short-term positions are simply held to expiry.
+    # See strategy/exit.py.
+    alpha_realized_exit_fraction: float = 0.7
+
     # Independent of the real account's actual balance (currently $20) so
     # paper trading can be exercised at a realistic scale before any real
     # capital is involved (build spec §7.3 "forward paper trading").
@@ -38,9 +72,12 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./data/kalshi_agent.db"
 
-    # Basic tier ≈ 20 read / 10 write per second (build spec §3.1) — verify against
-    # current docs.kalshi.com before relying on these for a higher-tier account.
-    read_rate_limit: float = 20
+    # Build spec §3.1 cited Basic tier as ≈20 read/sec, but a real per-series
+    # settled-market backfill 2026-07-08 got 429'd on nearly every request at
+    # that rate — actual limit is evidently lower (or burstier) than
+    # documented. Backed off to 10 to stop wasting round-trips on retries;
+    # re-verify against current docs.kalshi.com if this still 429s a lot.
+    read_rate_limit: float = 10
     write_rate_limit: float = 10
 
     poll_interval_seconds: int = 60
@@ -53,7 +90,11 @@ class Settings(BaseSettings):
     # category whose ~230k granular per-game markets blew the local DB past 1GB
     # in one test run — excluded from data collection until it has its own
     # favorite-longshot/closing-line study backing it (build spec idea #18).
-    target_categories: tuple[str, ...] = ("Politics", "Elections", "Financials", "Economics", "Crypto")
+    # "Climate and Weather" added 2026-07-09 to start collecting real
+    # weather-market data — needed to verify the WeatherSignal ticker-parsing
+    # layer (strategy/external/weather.py) against actual Kalshi examples,
+    # since none existed in the local DB before this change.
+    target_categories: tuple[str, ...] = ("Politics", "Elections", "Financials", "Economics", "Crypto", "Climate and Weather")
 
     # Hard cap on the local SQLite file (bytes). The poller checks this each
     # cycle and refuses to track new markets once exceeded — existing tracked

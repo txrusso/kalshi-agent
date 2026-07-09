@@ -53,6 +53,53 @@ def _db_size_bytes(database_url: str) -> int:
     return db_path.stat().st_size if db_path.exists() else 0
 
 
+# The cap is checked before fetching each page, but a single page (up to
+# 1000 markets) can still push the file past the raw cap before the next
+# check catches it — measured a real 2.1MB overshoot (502.1MB vs a 500MB
+# cap) from exactly this. Subtracting a safety margin from the effective
+# threshold keeps the actual file size under the true target.
+_SIZE_CAP_SAFETY_MARGIN_BYTES = 10_000_000
+
+
+def _effective_size_cap(max_db_size_bytes: int) -> int:
+    return max(0, max_db_size_bytes - _SIZE_CAP_SAFETY_MARGIN_BYTES)
+
+
+def _store_market_and_snapshot(session: Session, m: dict) -> str:
+    """Upserts Market metadata + a PriceSnapshot from one /markets listing
+    entry. Works for both open and settled markets — settled markets carry a
+    `result` field alongside the same price fields (verified 2026-07-08)."""
+    ticker = m["ticker"]
+    event_ticker = m.get("event_ticker", "")
+    session.merge(
+        Market(
+            ticker=ticker,
+            event_ticker=event_ticker,
+            series_ticker=series_ticker_from_event(event_ticker),
+            title=m.get("title", ""),
+            resolution_rules=m.get("rules_primary"),
+            open_time=_parse_dt(m.get("open_time")),
+            close_time=_parse_dt(m.get("close_time")),
+            expiration_time=_parse_dt(m.get("expiration_time")),
+            status=m.get("status", ""),
+            result=m.get("result"),
+            raw=m,
+        )
+    )
+    session.add(
+        PriceSnapshot(
+            ticker=ticker,
+            ts=dt.datetime.now(dt.timezone.utc),
+            yes_bid=_parse_float(m.get("yes_bid_dollars")),
+            yes_ask=_parse_float(m.get("yes_ask_dollars")),
+            last_price=_parse_float(m.get("last_price_dollars")),
+            volume=_parse_float(m.get("volume_fp")),
+            open_interest=_parse_float(m.get("open_interest_fp")),
+        )
+    )
+    return ticker
+
+
 async def sync_markets_and_snapshot(
     client: KalshiClient,
     session: Session,
@@ -62,12 +109,17 @@ async def sync_markets_and_snapshot(
     database_url: str,
     status: str = "open",
 ) -> list[str]:
-    """Single paginated sweep over Kalshi's open markets: filters to the
-    allowed series (evidence-backed categories), upserts market metadata, and
-    records a price snapshot from the same listing payload — no extra
-    per-market request needed, since /markets already returns top-of-book
-    prices. Stops adding *new* tickers once max_db_size_bytes is exceeded,
-    but still snapshots already-tracked ones for this cycle."""
+    """Single paginated sweep over Kalshi's markets in the given status:
+    filters to the allowed series (evidence-backed categories) client-side and
+    upserts. Works well for `open` (~230k total, allowed categories interleaved
+    throughout — verified 2026-07-08: 22,344 matches found across a full
+    sweep). Do NOT use this for `settled` — a 30k-market sample turned up zero
+    matches, because settled history is even more dominated by high-frequency
+    esports/sports resolutions than the open set; use backfill_settled_markets
+    (per-series query) for that instead.
+
+    Stops adding *new* tickers once max_db_size_bytes is exceeded, but still
+    snapshots already-tracked ones for this cycle."""
     tickers: list[str] = []
     cursor: str | None = None
     skipped_new_over_cap = 0
@@ -79,11 +131,10 @@ async def sync_markets_and_snapshot(
         page = await client.get_markets(**params)
         markets = page.get("markets", [])
 
-        size_ok = _db_size_bytes(database_url) < max_db_size_bytes
+        size_ok = _db_size_bytes(database_url) < _effective_size_cap(max_db_size_bytes)
 
         for m in markets:
-            event_ticker = m.get("event_ticker", "")
-            if series_ticker_from_event(event_ticker) not in allowed_series:
+            if series_ticker_from_event(m.get("event_ticker", "")) not in allowed_series:
                 continue
 
             ticker = m["ticker"]
@@ -92,33 +143,7 @@ async def sync_markets_and_snapshot(
                 skipped_new_over_cap += 1
                 continue
 
-            session.merge(
-                Market(
-                    ticker=ticker,
-                    event_ticker=event_ticker,
-                    series_ticker=series_ticker_from_event(event_ticker),
-                    title=m.get("title", ""),
-                    resolution_rules=m.get("rules_primary"),
-                    open_time=_parse_dt(m.get("open_time")),
-                    close_time=_parse_dt(m.get("close_time")),
-                    expiration_time=_parse_dt(m.get("expiration_time")),
-                    status=m.get("status", ""),
-                    result=m.get("result"),
-                    raw=m,
-                )
-            )
-            session.add(
-                PriceSnapshot(
-                    ticker=ticker,
-                    ts=dt.datetime.now(dt.timezone.utc),
-                    yes_bid=_parse_float(m.get("yes_bid_dollars")),
-                    yes_ask=_parse_float(m.get("yes_ask_dollars")),
-                    last_price=_parse_float(m.get("last_price_dollars")),
-                    volume=_parse_float(m.get("volume_fp")),
-                    open_interest=_parse_float(m.get("open_interest_fp")),
-                )
-            )
-            tickers.append(ticker)
+            tickers.append(_store_market_and_snapshot(session, m))
 
         session.commit()
         cursor = page.get("cursor")
@@ -131,6 +156,57 @@ async def sync_markets_and_snapshot(
             max_db_size_bytes / 1_000_000,
             skipped_new_over_cap,
         )
+    return tickers
+
+
+async def backfill_settled_markets(
+    client: KalshiClient,
+    session: Session,
+    *,
+    allowed_series: set[str],
+    max_db_size_bytes: int,
+    database_url: str,
+) -> list[str]:
+    """Resolved-outcome data for the favorite-longshot calibration curve (S2)
+    — one /markets?series_ticker=X&status=settled query per allowed series,
+    since a broad settled-status sweep doesn't reach the target categories
+    within any reasonable page budget (see sync_markets_and_snapshot docstring).
+    ~5k series at the read-rate limit takes a few minutes, not hours.
+
+    Size cap is checked before every page, not just before every series — a
+    single series can have many thousands of settled markets across many
+    pages, and checking only between series let one series' backfill blow
+    past the cap by 12MB+ before the next check could catch it (hit this for
+    real 2026-07-08)."""
+    tickers: list[str] = []
+    for series_ticker in allowed_series:
+        cursor: str | None = None
+        while True:
+            if _db_size_bytes(database_url) >= _effective_size_cap(max_db_size_bytes):
+                logger.warning(
+                    "DB at/over %.0f MB cap — stopping settled backfill early (mid-series %s)",
+                    max_db_size_bytes / 1_000_000, series_ticker,
+                )
+                return tickers
+
+            params: dict[str, object] = {
+                "series_ticker": series_ticker,
+                "status": "settled",
+                "mve_filter": "exclude",
+                "limit": 1000,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            page = await client.get_markets(**params)
+            markets = page.get("markets", [])
+            for m in markets:
+                tickers.append(_store_market_and_snapshot(session, m))
+            session.commit()
+            cursor = page.get("cursor")
+            if not cursor or not markets:
+                break
+
+    logger.info("settled backfill: stored %d resolved markets across %d series", len(tickers), len(allowed_series))
     return tickers
 
 

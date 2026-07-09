@@ -67,6 +67,11 @@ class Order(Base):
     mode: Mapped[str] = mapped_column(String)  # "PAPER" | "LIVE"
     strategy: Mapped[str | None] = mapped_column(String)
     reason: Mapped[str | None] = mapped_column(Text)  # signal/edge that triggered this order
+    # Entry-order-only fields for the alpha-realization exit (user directive
+    # 2026-07-09, see strategy/exit.py) — both already in the entry side's own
+    # price terms, matching how OrderRequest stores them.
+    fair_value_at_entry: Mapped[float | None] = mapped_column(Float)
+    time_horizon: Mapped[str | None] = mapped_column(String)  # "short" | "long"
     created_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
     updated_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
     raw: Mapped[dict | None] = mapped_column(JSON)
