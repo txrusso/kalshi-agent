@@ -90,6 +90,27 @@ async def test_run_trading_cycle_places_order_on_real_edge(tmp_path):
     assert accepted == 1
 
 
+async def test_run_trading_cycle_refreshes_balance_between_fills(tmp_path):
+    """Regression test for a real bug (2026-07-09): balance was computed once
+    at the top of the cycle and reused for every candidate's sizing. After
+    the first fill spent real capital, later candidates were still sized off
+    the pre-fill (larger) balance, oversizing them relative to the *current*
+    per-market cap and getting them rejected -- 12 of 13 real candidates were
+    rejected this way in one live cycle, right after the first fill. Two
+    different markets with saturating edge (kelly sizing pinned to the
+    per-market cap) should both fill if balance is refreshed correctly."""
+    Session = _session_factory(tmp_path)
+    _seed_open_market(Session, "KXFED-1", "KXFED-E1", 0.03)
+    _seed_open_market(Session, "KXCPI-1", "KXCPI-E1", 0.03)
+    settings = FakeSettings(kelly_fraction=1.0, per_market_max_fraction=0.10)
+    adapter = PaperExecutionAdapter(Session, settings)
+    signal = _biased_signal()
+
+    accepted = await run_trading_cycle(Session, adapter, signal, settings)
+
+    assert accepted == 2
+
+
 async def test_run_trading_cycle_no_orders_when_trading_disabled_upstream():
     # run_trading_cycle itself doesn't check trading_enabled -- that's
     # run_agent_cycle's job, verified separately below.

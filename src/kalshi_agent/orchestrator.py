@@ -98,6 +98,15 @@ async def run_trading_cycle(
         if result.accepted:
             accepted += 1
             logger.info("order accepted: %s %s x%d @ %.2f", ticker, order_request.side, order_request.count, order_request.price)
+            # Refresh balance after every fill: sizing later candidates in
+            # this same cycle off the stale (larger) pre-fill balance
+            # systematically oversizes them, so they then get rejected by
+            # the per-market cap purely from staleness, not because they're
+            # genuinely too large. Hit this for real 2026-07-09 -- 12 of 13
+            # candidates in one cycle were rejected this way right after the
+            # first fill dropped the true balance.
+            with session_factory() as session:
+                cash_balance = compute_cash_balance(session, mode=settings.mode, starting_balance=settings.paper_starting_balance)
 
     return accepted
 
