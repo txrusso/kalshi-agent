@@ -26,6 +26,7 @@ build/
 # Runtime / scheduling
 /logs/
 poller.lock
+agent.lock
 
 # OS / editor
 .DS_Store

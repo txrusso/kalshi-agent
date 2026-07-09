@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine
 
-from kalshi_agent.data.models import Fill, Market, Order, PriceSnapshot
+from kalshi_agent.data.models import Fill, LatestPrice, Market, Order
 from kalshi_agent.data.store import init_db, make_session_factory
 from kalshi_agent.strategy.exit import evaluate_alpha_realized_exit, find_positions_to_exit
 
@@ -58,8 +58,8 @@ def _seed_long_position(Session, *, entry_price, fair_value_at_entry, current_pr
                            time_horizon=time_horizon, created_ts=now, updated_ts=now, raw=None))
         session.add(Fill(order_id="o1", ticker="KXFED-T1", side="yes", action="buy", price=entry_price,
                           count=10, fee=0.02, is_taker=False, mode="PAPER", ts=now, raw=None))
-        session.add(PriceSnapshot(ticker="KXFED-T1", ts=now, yes_bid=current_price, yes_ask=current_price,
-                                   last_price=current_price, volume=1, open_interest=1))
+        session.add(LatestPrice(ticker="KXFED-T1", ts=now, yes_bid=current_price, yes_ask=current_price,
+                                 last_price=current_price, volume=1, open_interest=1))
         session.commit()
 
 

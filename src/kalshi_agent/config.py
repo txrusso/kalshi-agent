@@ -80,7 +80,11 @@ class Settings(BaseSettings):
     read_rate_limit: float = 10
     write_rate_limit: float = 10
 
-    poll_interval_seconds: int = 60
+    # A full open-market sweep across ~22k tracked markets took ~700s
+    # (~12 min) in real testing 2026-07-09 at the 10/sec rate limit — a 60s
+    # interval would mean cycles overlap/never catch up. Set comfortably
+    # above the observed sweep time.
+    poll_interval_seconds: int = 1800
 
     # Kalshi categories with a direct evidence base in the lit review (favorite-
     # longshot bias is systematic across categories, but Politics/Elections and

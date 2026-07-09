@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kalshi_agent.data.models import Market, Order, PriceSnapshot
+from kalshi_agent.data.models import LatestPrice, Market, Order
 from kalshi_agent.ledger.portfolio import compute_positions
 from kalshi_agent.risk.guardrails import OrderRequest
 
@@ -66,13 +66,11 @@ def find_positions_to_exit(session: Session, settings) -> list[OrderRequest]:
         if entry_order is None or entry_order.time_horizon != "long" or entry_order.fair_value_at_entry is None:
             continue
 
-        latest_snapshot = session.scalars(
-            select(PriceSnapshot).where(PriceSnapshot.ticker == pos.ticker).order_by(PriceSnapshot.ts.desc())
-        ).first()
-        if latest_snapshot is None or latest_snapshot.last_price is None:
+        latest = session.get(LatestPrice, pos.ticker)
+        if latest is None or latest.last_price is None:
             continue
 
-        current_price_yes = latest_snapshot.last_price
+        current_price_yes = latest.last_price
         current_price = current_price_yes if pos.side == "yes" else 1 - current_price_yes
         if not 0 < current_price < 1:
             continue

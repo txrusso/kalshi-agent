@@ -40,6 +40,31 @@ class PriceSnapshot(Base):
     open_interest: Mapped[float | None] = mapped_column(Float)
 
 
+class LatestPrice(Base):
+    """One row per ticker, upserted in place — the bounded, continuously-
+    refreshed "current price" feed for live trading decisions. Added
+    2026-07-09: PriceSnapshot is append-only (one new row every sync cycle
+    per market) and is meant as the static historical research corpus for
+    calibration — it's already at ~472MB of the 500MB cap from a one-time
+    backfill. Continuously re-snapshotting ~22k open markets every cycle
+    for ongoing operation would blow straight through the cap within days,
+    since sync_markets_and_snapshot's size-cap check only gates *new*
+    Market rows, not repeated PriceSnapshot inserts for already-tracked
+    ones. This table is upserted (session.merge), so its size is bounded by
+    the number of currently-open tracked markets (~tens of thousands of
+    rows, a few MB) no matter how many refresh cycles run."""
+
+    __tablename__ = "latest_prices"
+
+    ticker: Mapped[str] = mapped_column(ForeignKey("markets.ticker"), primary_key=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
+    yes_bid: Mapped[float | None] = mapped_column(Float)
+    yes_ask: Mapped[float | None] = mapped_column(Float)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float)
+    open_interest: Mapped[float | None] = mapped_column(Float)
+
+
 class OrderbookSnapshot(Base):
     __tablename__ = "orderbook_snapshots"
 

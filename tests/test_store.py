@@ -47,3 +47,23 @@ def test_market_and_snapshot_roundtrip():
 
         snapshot = session.query(PriceSnapshot).filter_by(ticker="TEST-01").one()
         assert snapshot.yes_bid == 45
+
+
+def test_make_engine_enables_wal_mode_for_concurrent_access(tmp_path):
+    from dataclasses import dataclass
+
+    from kalshi_agent.data.store import make_engine
+
+    @dataclass
+    class FakeSettings:
+        database_url: str
+
+    settings = FakeSettings(database_url=f"sqlite:///{tmp_path / 'wal_test.db'}")
+    engine = make_engine(settings)
+
+    with engine.connect() as conn:
+        mode = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
+        timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+
+    assert mode == "wal"
+    assert timeout == 5000

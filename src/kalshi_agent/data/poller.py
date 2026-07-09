@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from kalshi_agent.config import Settings
 from kalshi_agent.data.client import KalshiClient
-from kalshi_agent.data.models import Market, PriceSnapshot
+from kalshi_agent.data.models import LatestPrice, Market, PriceSnapshot
 from kalshi_agent.data.store import init_db, make_engine, make_session_factory
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,77 @@ def _store_market_and_snapshot(session: Session, m: dict) -> str:
         )
     )
     return ticker
+
+
+def _store_market_and_latest_price(session: Session, m: dict) -> str:
+    """Upserts Market metadata + a LatestPrice row (bounded — one row per
+    ticker, not append-only). Use this, not _store_market_and_snapshot, for
+    any *repeating* sync loop — see LatestPrice's docstring for why."""
+    ticker = m["ticker"]
+    event_ticker = m.get("event_ticker", "")
+    session.merge(
+        Market(
+            ticker=ticker,
+            event_ticker=event_ticker,
+            series_ticker=series_ticker_from_event(event_ticker),
+            title=m.get("title", ""),
+            resolution_rules=m.get("rules_primary"),
+            open_time=_parse_dt(m.get("open_time")),
+            close_time=_parse_dt(m.get("close_time")),
+            expiration_time=_parse_dt(m.get("expiration_time")),
+            status=m.get("status", ""),
+            result=m.get("result"),
+            raw=m,
+        )
+    )
+    session.merge(
+        LatestPrice(
+            ticker=ticker,
+            ts=dt.datetime.now(dt.timezone.utc),
+            yes_bid=_parse_float(m.get("yes_bid_dollars")),
+            yes_ask=_parse_float(m.get("yes_ask_dollars")),
+            last_price=_parse_float(m.get("last_price_dollars")),
+            volume=_parse_float(m.get("volume_fp")),
+            open_interest=_parse_float(m.get("open_interest_fp")),
+        )
+    )
+    return ticker
+
+
+async def sync_latest_prices(
+    client: KalshiClient,
+    session: Session,
+    *,
+    allowed_series: set[str],
+    status: str = "open",
+) -> list[str]:
+    """The repeating-safe counterpart to sync_markets_and_snapshot: same
+    paginated sweep and category filter, but upserts LatestPrice (bounded)
+    instead of appending PriceSnapshot rows forever. This is what continuous
+    operation (run_poller, the orchestrator) should call — no size-cap logic
+    needed here since upserting can't grow the table beyond one row per
+    currently-tracked market."""
+    tickers: list[str] = []
+    cursor: str | None = None
+
+    while True:
+        params: dict[str, object] = {"status": status, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        page = await client.get_markets(**params)
+        markets = page.get("markets", [])
+
+        for m in markets:
+            if series_ticker_from_event(m.get("event_ticker", "")) not in allowed_series:
+                continue
+            tickers.append(_store_market_and_latest_price(session, m))
+
+        session.commit()
+        cursor = page.get("cursor")
+        if not cursor or not markets:
+            break
+
+    return tickers
 
 
 async def sync_markets_and_snapshot(
@@ -211,6 +282,14 @@ async def backfill_settled_markets(
 
 
 async def run_poller(settings: Settings) -> None:
+    """Continuous data-refresh loop (this is what the Windows Scheduled Task
+    launches on network reconnect, and what the orchestrator's data step
+    uses). Uses sync_latest_prices (bounded, upserted) rather than
+    sync_markets_and_snapshot (append-only, meant for one-time/manual
+    historical-corpus building) — a repeating loop calling the append-only
+    version would blow the 500MB cap within days regardless of the cap
+    check, since that check only gates *new* markets, not repeated
+    snapshots of already-tracked ones."""
     engine = make_engine(settings)
     init_db(engine)
     session_factory = make_session_factory(engine)
@@ -219,15 +298,9 @@ async def run_poller(settings: Settings) -> None:
         allowed_series = await load_allowed_series(client, settings.target_categories)
         while True:
             with session_factory() as session:
-                tickers = await sync_markets_and_snapshot(
-                    client,
-                    session,
-                    allowed_series=allowed_series,
-                    max_db_size_bytes=settings.max_db_size_bytes,
-                    database_url=settings.database_url,
-                )
+                tickers = await sync_latest_prices(client, session, allowed_series=allowed_series)
                 logger.info(
-                    "tracked %d markets in target categories, db=%.1f MB",
+                    "refreshed prices for %d markets in target categories, db=%.1f MB",
                     len(tickers),
                     _db_size_bytes(settings.database_url) / 1_000_000,
                 )

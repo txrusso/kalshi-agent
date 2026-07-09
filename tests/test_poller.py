@@ -3,11 +3,12 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 
-from kalshi_agent.data.models import Market, PriceSnapshot
+from kalshi_agent.data.models import LatestPrice, Market, PriceSnapshot
 from kalshi_agent.data.poller import (
     _effective_size_cap,
     backfill_settled_markets,
     series_ticker_from_event,
+    sync_latest_prices,
     sync_markets_and_snapshot,
 )
 from kalshi_agent.data.store import init_db, make_session_factory
@@ -218,3 +219,42 @@ async def test_backfill_settled_stops_mid_series_between_pages(tmp_path, monkeyp
 
     assert tickers == ["KXFED-25DEC-T1"]
     assert len(client.calls) == 1  # second page of KXFED never fetched
+
+
+async def test_sync_latest_prices_upserts_not_appends(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'latest.db'}"
+    engine = create_engine(db_url, future=True)
+    init_db(engine)
+    Session = make_session_factory(engine)
+
+    market_v1 = [_market("KXFED-25DEC-T1", "KXFED-25DEC", yes_bid_dollars="0.4000")]
+    market_v2 = [_market("KXFED-25DEC-T1", "KXFED-25DEC", yes_bid_dollars="0.5500")]
+
+    with Session() as session:
+        await sync_latest_prices(FakeClient(market_v1), session, allowed_series={"KXFED"})
+    with Session() as session:
+        await sync_latest_prices(FakeClient(market_v2), session, allowed_series={"KXFED"})
+
+    with Session() as session:
+        rows = session.query(LatestPrice).filter_by(ticker="KXFED-25DEC-T1").all()
+        assert len(rows) == 1  # upserted, not a second row
+        assert rows[0].yes_bid == 0.55
+
+        # The append-only history table must be completely untouched by this path.
+        assert session.query(PriceSnapshot).count() == 0
+
+
+async def test_sync_latest_prices_filters_by_category_like_the_history_version(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'latest.db'}"
+    engine = create_engine(db_url, future=True)
+    init_db(engine)
+    Session = make_session_factory(engine)
+
+    markets = [
+        _market("KXFED-25DEC-T1", "KXFED-25DEC"),
+        _market("KXMVESPORTSMULTIGAMEEXTENDED-S1-M1", "KXMVESPORTSMULTIGAMEEXTENDED-S1"),
+    ]
+    with Session() as session:
+        tickers = await sync_latest_prices(FakeClient(markets), session, allowed_series={"KXFED"})
+
+    assert tickers == ["KXFED-25DEC-T1"]
